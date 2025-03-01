@@ -2,17 +2,45 @@ import streamlit as st
 import fitz  # PyMuPDF for PDF extraction
 import docx2txt
 import textstat
-from transformers import pipeline
 import io
+import requests
+import pandas as pd
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import simpleSplit
 
 # ---------------------------
-# Setup LLM for skill extraction
+# Setup spaCy & SkillNER
 # ---------------------------
-skill_extractor = pipeline("ner", model="dbmdz/bert-large-cased-finetuned-conll03-english")
+import spacy
+from spacy.matcher import PhraseMatcher  # We will pass the class, not an instance
+from skillNer.general_params import SKILL_DB
+from skillNer.skill_extractor_class import SkillExtractor
 
+# Load spaCy English model
+nlp = spacy.load("en_core_web_sm")
+
+# Instead of creating an instance, pass the PhraseMatcher class itself.
+matcher = PhraseMatcher
+
+# Initialize SkillExtractor with the skills database and the matcher callable.
+skill_extractor = SkillExtractor(nlp, SKILL_DB, matcher)
+
+# ---------------------------
+# (Optional) Load ESCO Skills Database dynamically
+# ---------------------------
+def load_ESCO_skills():
+    try:
+        url = "https://esco-occupations-skills.org/api/skills"
+        response = requests.get(url)
+        data = response.json()
+        esco_skills = set(skill["preferredLabel"]["en"] for skill in data)
+        return esco_skills
+    except Exception as e:
+        st.warning("ESCO skills could not be loaded. Using SkillNER only.")
+        return set()
+
+ESCO_SKILLS = load_ESCO_skills()  # Load ESCO skills dynamically
 
 # ---------------------------
 # Functions for text extraction
@@ -24,25 +52,32 @@ def extract_text_from_pdf(pdf_file):
             text += page.get_text()
     return text
 
-
 def extract_text_from_docx(docx_file):
     return docx2txt.process(docx_file)
 
+# ---------------------------
+# Enhanced Skill Extraction
+# ---------------------------
+def extract_skills(text):
+    # Extract skills using SkillNER
+    annotations = skill_extractor.annotate(text)
+    extracted_skills = [skill['doc_node_value'] for skill in annotations["results"]["full_matches"]]
+
+    # If ESCO database is available, cross-check extracted skills
+    if ESCO_SKILLS:
+        detected_skills = [skill for skill in extracted_skills if skill in ESCO_SKILLS]
+    else:
+        detected_skills = extracted_skills
+
+    return list(set(detected_skills))
 
 # ---------------------------
 # Analyze resume text
 # ---------------------------
-def extract_skills(text):
-    entities = skill_extractor(text)
-    skills = [ent['word'] for ent in entities if ent['entity'].startswith('B-')]
-    return list(set(skills))
-
-
 def analyze_resume(text):
     readability_score = round(textstat.flesch_reading_ease(text), 2)
     gunning_fog = round(textstat.gunning_fog(text), 2)
     smog_index = round(textstat.smog_index(text), 2)
-
     detected_skills = extract_skills(text)
 
     return {
@@ -52,7 +87,6 @@ def analyze_resume(text):
         "smog_index": smog_index,
         "detected_skills": detected_skills
     }
-
 
 # ---------------------------
 # Generate a formatted PDF
@@ -85,7 +119,6 @@ def generate_pdf_bytes(resume_text, detected_skills):
     buffer.seek(0)
     return buffer.getvalue()
 
-
 # ---------------------------
 # Streamlit UI
 # ---------------------------
@@ -108,7 +141,8 @@ if uploaded_resume:
     st.write(f"**Gunning Fog Index:** {analysis['gunning_fog']}")
     st.write(f"**SMOG Index:** {analysis['smog_index']}")
     st.write(
-        f"**Detected Skills:** {', '.join(analysis['detected_skills']) if analysis['detected_skills'] else 'None'}")
+        f"**Detected Skills:** {', '.join(analysis['detected_skills']) if analysis['detected_skills'] else 'None'}"
+    )
 
     pdf_bytes = generate_pdf_bytes(resume_text, analysis['detected_skills'])
     st.download_button("Download Formatted Resume PDF", data=pdf_bytes, file_name="formatted_resume.pdf",
