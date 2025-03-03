@@ -1,149 +1,166 @@
-import streamlit as st
-import fitz  # PyMuPDF for PDF extraction
+import os
+import io
+import fitz  # PyMuPDF for PDF text extraction
 import docx2txt
 import textstat
-import io
-import requests
-import pandas as pd
+import spacy
+import torch
+from flask import Flask, request, jsonify, send_file, send_from_directory
+from flask_cors import CORS
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import simpleSplit
 
-# ---------------------------
-# Setup spaCy & SkillNER
-# ---------------------------
-import spacy
-from spacy.matcher import PhraseMatcher  # We will pass the class, not an instance
-from skillNer.general_params import SKILL_DB
-from skillNer.skill_extractor_class import SkillExtractor
+app = Flask(__name__, static_folder="../public", static_url_path="/")
+CORS(app)
 
-# Load spaCy English model
+# Load spaCy model (for any additional processing if needed)
 nlp = spacy.load("en_core_web_sm")
 
-# Instead of creating an instance, pass the PhraseMatcher class itself.
-matcher = PhraseMatcher
+# Load the DeepSeek R1 1.5B model locally.
+# Update MODEL_PATH if necessary.
+MODEL_PATH = r"C:\Users\HP\.cache\huggingface\hub\models--deepseek-ai--DeepSeek-R1-Distill-Qwen-1.5B\snapshots\ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562"
+tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+model = AutoModelForCausalLM.from_pretrained
 
-# Initialize SkillExtractor with the skills database and the matcher callable.
-skill_extractor = SkillExtractor(nlp, SKILL_DB, matcher)
+# Ensure the temporary directory exists
+os.makedirs("temp", exist_ok=True)
 
-# ---------------------------
-# (Optional) Load ESCO Skills Database dynamically
-# ---------------------------
-def load_ESCO_skills():
-    try:
-        url = "https://esco-occupations-skills.org/api/skills"
-        response = requests.get(url)
-        data = response.json()
-        esco_skills = set(skill["preferredLabel"]["en"] for skill in data)
-        return esco_skills
-    except Exception as e:
-        st.warning("ESCO skills could not be loaded. Using SkillNER only.")
-        return set()
-
-ESCO_SKILLS = load_ESCO_skills()  # Load ESCO skills dynamically
 
 # ---------------------------
-# Functions for text extraction
+# Helper Functions for Text Extraction
 # ---------------------------
-def extract_text_from_pdf(pdf_file):
+def extract_text_from_pdf(pdf_file_path):
     text = ""
-    with fitz.open(stream=pdf_file.read(), filetype="pdf") as doc:
+    with fitz.open(pdf_file_path) as doc:
         for page in doc:
             text += page.get_text()
     return text
 
-def extract_text_from_docx(docx_file):
-    return docx2txt.process(docx_file)
+
+def extract_text_from_docx(docx_file_path):
+    return docx2txt.process(docx_file_path)
+
 
 # ---------------------------
-# Enhanced Skill Extraction
+# Skill Extraction using DeepSeek R1
 # ---------------------------
 def extract_skills(text):
-    # Extract skills using SkillNER
-    annotations = skill_extractor.annotate(text)
-    extracted_skills = [skill['doc_node_value'] for skill in annotations["results"]["full_matches"]]
+    # Construct a prompt for the model to extract skills
+    prompt = f"Extract key skills from the following resume:\n{text}\nSkills:"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+    outputs = model.generate(**inputs, max_length=300)
+    generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-    # If ESCO database is available, cross-check extracted skills
-    if ESCO_SKILLS:
-        detected_skills = [skill for skill in extracted_skills if skill in ESCO_SKILLS]
+    # Try to extract the list after "Skills:"
+    if "Skills:" in generated_text:
+        skills_str = generated_text.split("Skills:")[-1].strip()
     else:
-        detected_skills = extracted_skills
+        skills_str = generated_text.strip()
+    # Split the skills string by commas and strip spaces
+    skills_list = [skill.strip() for skill in skills_str.split(",") if skill.strip()]
+    return list(set(skills_list))
 
-    return list(set(detected_skills))
 
 # ---------------------------
-# Analyze resume text
+# Resume Analysis Function
 # ---------------------------
 def analyze_resume(text):
-    readability_score = round(textstat.flesch_reading_ease(text), 2)
-    gunning_fog = round(textstat.gunning_fog(text), 2)
-    smog_index = round(textstat.smog_index(text), 2)
-    detected_skills = extract_skills(text)
-
     return {
         "total_words": len(text.split()),
-        "readability_score": readability_score,
-        "gunning_fog": gunning_fog,
-        "smog_index": smog_index,
-        "detected_skills": detected_skills
+        "readability_score": round(textstat.flesch_reading_ease(text), 2),
+        "gunning_fog": round(textstat.gunning_fog(text), 2),
+        "smog_index": round(textstat.smog_index(text), 2),
+        "detected_skills": extract_skills(text),
+        "resume_text": text  # Include full text for PDF generation
     }
 
+
 # ---------------------------
-# Generate a formatted PDF
+# PDF Generation Function using ReportLab
 # ---------------------------
-def generate_pdf_bytes(resume_text, detected_skills):
+def generate_pdf(resume_text, detected_skills):
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=letter)
     width, height = letter
-    c.setFont("Helvetica-Bold", 14)
+
+    # Header Section
+    c.setFont("Helvetica-Bold", 16)
     c.drawString(50, height - 50, "AI-Formatted Resume")
     c.line(50, height - 55, width - 50, height - 55)
 
+    # Skills Section
     c.setFont("Helvetica", 12)
     c.drawString(50, height - 80, "Detected Skills:")
     c.setFont("Helvetica-Bold", 12)
-    c.drawString(150, height - 80, ", ".join(detected_skills) if detected_skills else "None")
-
-    c.setFont("Helvetica", 10)
-    text_lines = simpleSplit(resume_text, "Helvetica", 10, width - 100)
-    y = height - 110
-    for line in text_lines:
+    skills_text = ", ".join(detected_skills) if detected_skills else "None"
+    wrapped_skills = simpleSplit(skills_text, "Helvetica-Bold", 12, width - 100)
+    y = height - 100
+    for line in wrapped_skills:
         c.drawString(50, y, line)
-        y -= 14
-        if y < 50:
+        y -= 16
+
+    # Resume Text Section
+    c.setFont("Helvetica", 10)
+    y -= 20  # Add extra spacing
+    wrapped_text = simpleSplit(resume_text, "Helvetica", 10, width - 100)
+    for line in wrapped_text:
+        if y < 50:  # Start a new page if the space is insufficient
             c.showPage()
             y = height - 50
             c.setFont("Helvetica", 10)
+        c.drawString(50, y, line)
+        y -= 14
 
     c.save()
     buffer.seek(0)
-    return buffer.getvalue()
+    return buffer
+
 
 # ---------------------------
-# Streamlit UI
+# Flask Routes / Endpoints
 # ---------------------------
-st.title("AI-Powered Resume Analyzer")
-st.write("Upload your resume (PDF or DOCX) to get an AI-based analysis.")
 
-uploaded_resume = st.file_uploader("Upload Resume", type=["pdf", "docx"])
+# Serve landing page (from public folder)
+@app.route('/')
+def index():
+    return send_from_directory(app.static_folder, "index.html")
 
-if uploaded_resume:
-    if uploaded_resume.type == "application/pdf":
-        resume_text = extract_text_from_pdf(uploaded_resume)
+
+# POST /analyze: Process uploaded resume and return analysis results in JSON
+@app.route('/analyze', methods=['POST'])
+def analyze():
+    if "resume" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    file = request.files["resume"]
+    temp_path = os.path.join("temp", file.filename)
+    file.save(temp_path)
+
+    if file.filename.lower().endswith(".pdf"):
+        resume_text = extract_text_from_pdf(temp_path)
+    elif file.filename.lower().endswith(".docx"):
+        resume_text = extract_text_from_docx(temp_path)
     else:
-        resume_text = extract_text_from_docx(uploaded_resume)
+        os.remove(temp_path)
+        return jsonify({"error": "Invalid file format"}), 400
 
-    analysis = analyze_resume(resume_text)
+    os.remove(temp_path)  # Clean up temporary file
+    analysis_result = analyze_resume(resume_text)
+    return jsonify(analysis_result)
 
-    st.subheader("Resume Analysis")
-    st.write(f"**Total Words:** {analysis['total_words']}")
-    st.write(f"**Flesch Reading Ease:** {analysis['readability_score']}")
-    st.write(f"**Gunning Fog Index:** {analysis['gunning_fog']}")
-    st.write(f"**SMOG Index:** {analysis['smog_index']}")
-    st.write(
-        f"**Detected Skills:** {', '.join(analysis['detected_skills']) if analysis['detected_skills'] else 'None'}"
-    )
 
-    pdf_bytes = generate_pdf_bytes(resume_text, analysis['detected_skills'])
-    st.download_button("Download Formatted Resume PDF", data=pdf_bytes, file_name="formatted_resume.pdf",
-                       mime="application/pdf")
+# POST /generate-pdf: Generate a formatted PDF resume from JSON data
+@app.route('/generate-pdf', methods=['POST'])
+def generate_pdf_endpoint():
+    data = request.get_json()
+    resume_text = data.get("resume_text", "")
+    detected_skills = data.get("detected_skills", [])
+    pdf_buffer = generate_pdf(resume_text, detected_skills)
+    return send_file(pdf_buffer, as_attachment=True, download_name="formatted_resume.pdf", mimetype="application/pdf")
+
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
