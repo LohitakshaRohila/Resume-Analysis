@@ -1,0 +1,10 @@
+flask
+flask-cors
+transformers
+torch
+accelerate
+textstat
+spacy
+pymupdf
+docx2txt
+reportlab
