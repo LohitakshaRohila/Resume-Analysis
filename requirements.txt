@@ -1,7 +1,0 @@
-streamlit
-pymupdf
-docx2txt
-textstat
-transformers
-torch
-reportlab
