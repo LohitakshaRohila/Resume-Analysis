@@ -15,6 +15,8 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.utils import simpleSplit
 
+PUBLIC_FOLDER = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'public'))
+
 # OCR fallback
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"  # path inside Colab, usually pre-installed
 
