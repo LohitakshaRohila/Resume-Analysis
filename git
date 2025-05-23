@@ -1,0 +1,17 @@
+# If you haven’t initialized git here yet:
+git init
+
+# Make sure the remote points to your GitHub repo:
+git remote add origin https://github.com/LohitakshaRohila/Resume-Analysis.git
+
+# If 'origin' remote already exists and you want to update it (to avoid errors):
+# git remote set-url origin https://github.com/LohitakshaRohila/Resume-Analysis.git
+
+# Stage all files in your current project folder
+git add .
+
+# Commit those files with a clear message
+git commit -m "Replace all files with local project version"
+
+# Force push to overwrite the GitHub repo with your local stuff on the main branch
+git push origin main --force

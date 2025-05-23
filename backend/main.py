@@ -107,7 +107,7 @@ def create_pdf(resume_text, detected_skills):
 
 @app.route('/')
 def index():
-    return send_from_directory(app.static_folder, "index.html")
+    return send_from_directory(PUBLIC_FOLDER, "index.html")
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
